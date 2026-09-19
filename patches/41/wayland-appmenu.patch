@@ -1,0 +1,908 @@
+diff --git a/filenames.gni b/filenames.gni
+index 580167718..405fc2b11 100644
+--- a/filenames.gni
++++ b/filenames.gni
+@@ -50,6 +50,8 @@ filenames = {
+     "shell/browser/ui/views/caption_button_placeholder_container.h",
+     "shell/browser/ui/views/client_frame_view_linux.cc",
+     "shell/browser/ui/views/client_frame_view_linux.h",
++    "shell/browser/ui/views/global_menu_bar_linux.cc",
++    "shell/browser/ui/views/global_menu_bar_linux.h",
+     "shell/browser/ui/views/linux_frame_layout.cc",
+     "shell/browser/ui/views/linux_frame_layout.h",
+     "shell/common/application_info_linux.cc",
+@@ -62,8 +64,6 @@ filenames = {
+   lib_sources_linux_x11 = [
+     "shell/browser/ui/views/global_menu_bar_registrar_x11.cc",
+     "shell/browser/ui/views/global_menu_bar_registrar_x11.h",
+-    "shell/browser/ui/views/global_menu_bar_x11.cc",
+-    "shell/browser/ui/views/global_menu_bar_x11.h",
+     "shell/browser/ui/x/event_disabler.cc",
+     "shell/browser/ui/x/event_disabler.h",
+     "shell/browser/ui/x/x_window_utils.cc",
+diff --git a/shell/browser/native_window_views.cc b/shell/browser/native_window_views.cc
+index 13114a773..97a412008 100644
+--- a/shell/browser/native_window_views.cc
++++ b/shell/browser/native_window_views.cc
+@@ -21,6 +21,7 @@
+ #include <vector>
+ 
+ #include "base/containers/fixed_flat_set.h"
++#include "base/environment.h"
+ #include "base/memory/raw_ref.h"
+ #include "base/numerics/ranges.h"
+ #include "base/strings/utf_string_conversions.h"
+@@ -65,21 +66,23 @@
+ #include "shell/browser/linux/x11_util.h"
+ #include "shell/browser/ui/electron_desktop_window_tree_host_linux.h"
+ #include "shell/browser/ui/views/client_frame_view_linux.h"
++#include "shell/browser/ui/views/global_menu_bar_linux.h"
+ #include "shell/browser/ui/views/linux_frame_layout.h"
+ #include "shell/browser/ui/views/native_frame_view.h"
+ #include "shell/browser/ui/views/opaque_frame_view.h"
+ #include "shell/common/platform_util.h"
++#include "ui/platform_window/extensions/wayland_extension.h"
+ #include "ui/views/widget/desktop_aura/desktop_native_widget_aura.h"
+ #include "ui/views/window/native_frame_view.h"
+ 
+ #if BUILDFLAG(SUPPORTS_OZONE_X11)
+-#include "shell/browser/ui/views/global_menu_bar_x11.h"
+ #include "shell/browser/ui/x/event_disabler.h"
+ #include "shell/browser/ui/x/x_window_utils.h"
+ #include "ui/gfx/x/atom_cache.h"
+ #include "ui/gfx/x/connection.h"
+ #include "ui/gfx/x/shape.h"
+ #include "ui/gfx/x/xproto.h"
++#include "ui/platform_window/extensions/x11_extension.h"
+ #endif
+ 
+ #elif BUILDFLAG(IS_WIN)
+@@ -197,6 +200,18 @@ class NativeWindowClientView : public views::ClientView {
+   const raw_ref<NativeWindowViews> window_;
+ };
+ 
++#if BUILDFLAG(IS_LINUX)
++bool ShouldUseGlobalMenuBar() {
++  auto env = base::Environment::Create();
++  return !env->HasVar("ELECTRON_FORCE_WINDOW_MENU_BAR");
++}
++
++ui::PlatformWindow* GetPlatformWindow(gfx::AcceleratedWidget widget) {
++  auto* tree_host = views::DesktopWindowTreeHostLinux::GetHostForWidget(widget);
++  return tree_host ? tree_host->platform_window() : nullptr;
++}
++#endif
++
+ }  // namespace
+ 
+ NativeWindowViews::NativeWindowViews(const gin_helper::Dictionary& options,
+@@ -575,7 +590,7 @@ void NativeWindowViews::Show() {
+ 
+ #if BUILDFLAG(IS_LINUX)
+   if (global_menu_bar_)
+-    global_menu_bar_->OnWindowMapped();
++    global_menu_bar_->OnWindowMapped(GetPlatformWindow(GetAcceleratedWidget()));
+ 
+   // On X11, setting Z order before showing the window doesn't take effect,
+   // so we have to call it again.
+@@ -591,7 +606,7 @@ void NativeWindowViews::ShowInactive() {
+ 
+ #if BUILDFLAG(IS_LINUX)
+   if (global_menu_bar_)
+-    global_menu_bar_->OnWindowMapped();
++    global_menu_bar_->OnWindowMapped(GetPlatformWindow(GetAcceleratedWidget()));
+ 
+   // On X11, setting Z order before showing the window doesn't take effect,
+   // so we have to call it again.
+@@ -610,7 +625,8 @@ void NativeWindowViews::Hide() {
+ 
+ #if BUILDFLAG(IS_LINUX)
+   if (global_menu_bar_)
+-    global_menu_bar_->OnWindowUnmapped();
++    global_menu_bar_->OnWindowUnmapped(
++        GetPlatformWindow(GetAcceleratedWidget()));
+ #endif
+ 
+ #if BUILDFLAG(IS_WIN)
+@@ -1405,8 +1421,12 @@ bool NativeWindowViews::IsFocusable() const {
+ 
+ void NativeWindowViews::SetMenu(ElectronMenuModel* menu_model) {
+ #if BUILDFLAG(IS_LINUX)
++  ui::PlatformWindow* platform_window =
++      GetPlatformWindow(GetAcceleratedWidget());
++
+   // Remove global menu bar.
+   if (global_menu_bar_ && menu_model == nullptr) {
++    global_menu_bar_->OnWindowUnmapped(platform_window);
+     global_menu_bar_.reset();
+     root_view_.UnregisterAcceleratorsWithFocusManager();
+     return;
+@@ -1416,16 +1436,38 @@ void NativeWindowViews::SetMenu(ElectronMenuModel* menu_model) {
+   const bool can_use_global_menus = ui::OzonePlatform::GetInstance()
+                                         ->GetPlatformRuntimeProperties()
+                                         .supports_global_application_menus;
+-  if (can_use_global_menus && ShouldUseGlobalMenuBar()) {
++  const bool has_wayland_global_menu =
++      can_use_global_menus && platform_window &&
++      ui::GetWaylandToplevelExtension(*platform_window);
++#if BUILDFLAG(SUPPORTS_OZONE_X11)
++  const bool has_x11_global_menu =
++      can_use_global_menus && platform_window &&
++      ui::GetX11Extension(*platform_window) &&
++      HasGlobalMenuBarX11Registrar();
++#else
++  const bool has_x11_global_menu = false;
++#endif
++
++  if ((has_wayland_global_menu || has_x11_global_menu) &&
++      ShouldUseGlobalMenuBar()) {
+     if (!global_menu_bar_)
+       global_menu_bar_ =
+-          std::make_unique<GlobalMenuBarX11>(GetAcceleratedWidget());
++          std::make_unique<GlobalMenuBarLinux>(platform_window,
++                                               GetAcceleratedWidget());
+     if (global_menu_bar_->IsServerStarted()) {
+       root_view_.RegisterAcceleratorsWithFocusManager(menu_model);
+       global_menu_bar_->SetMenu(menu_model);
++      if (IsVisible())
++        global_menu_bar_->OnWindowMapped(platform_window);
+       return;
+     }
+   }
++
++  if (global_menu_bar_) {
++    global_menu_bar_->OnWindowUnmapped(platform_window);
++    global_menu_bar_.reset();
++    root_view_.UnregisterAcceleratorsWithFocusManager();
++  }
+ #endif
+ 
+   // Should reset content size when setting menu.
+@@ -1873,6 +1915,12 @@ void NativeWindowViews::OnWidgetDestroying(views::Widget* widget) {
+   if (aura::Window* window = GetNativeWindow())
+     window->RemovePreTargetHandler(this);
+ 
++#if BUILDFLAG(IS_LINUX)
++  if (global_menu_bar_)
++    global_menu_bar_->OnWindowUnmapped(
++        GetPlatformWindow(GetAcceleratedWidget()));
++#endif
++
+   if (is_modal()) {
+     if (NativeWindow* const parent = this->parent()) {
+       // Enable parent window after current window gets closed.
+diff --git a/shell/browser/native_window_views.h b/shell/browser/native_window_views.h
+index 309ffd419..7fb069fed 100644
+--- a/shell/browser/native_window_views.h
++++ b/shell/browser/native_window_views.h
+@@ -34,7 +34,7 @@ namespace electron {
+ 
+ #if BUILDFLAG(IS_LINUX)
+ class ClientFrameViewLinux;
+-class GlobalMenuBarX11;
++class GlobalMenuBarLinux;
+ class LinuxFrameLayout;
+ #endif
+ 
+@@ -278,7 +278,7 @@ class NativeWindowViews : public NativeWindow,
+   extensions::SizeConstraints old_size_constraints_;
+ 
+ #if BUILDFLAG(IS_LINUX)
+-  std::unique_ptr<GlobalMenuBarX11> global_menu_bar_;
++  std::unique_ptr<GlobalMenuBarLinux> global_menu_bar_;
+ #endif
+ 
+ #if BUILDFLAG(SUPPORTS_OZONE_X11)
+diff --git a/shell/browser/ui/views/global_menu_bar_x11.cc b/shell/browser/ui/views/global_menu_bar_linux.cc
+similarity index 65%
+rename from shell/browser/ui/views/global_menu_bar_x11.cc
+rename to shell/browser/ui/views/global_menu_bar_linux.cc
+index 2c5e5de42..c8b5dd731 100644
+--- a/shell/browser/ui/views/global_menu_bar_x11.cc
++++ b/shell/browser/ui/views/global_menu_bar_linux.cc
+@@ -2,50 +2,54 @@
+ // Use of this source code is governed by the MIT license that can be
+ // found in the LICENSE file.
+ 
+-#include "shell/browser/ui/views/global_menu_bar_x11.h"
++#include "shell/browser/ui/views/global_menu_bar_linux.h"
+ 
+ #include <dlfcn.h>
++#include <gio/gio.h>
+ #include <glib-object.h>
+ 
++#include "base/atomic_sequence_num.h"
+ #include "base/functional/bind.h"
+ #include "base/notimplemented.h"
+ #include "base/strings/utf_string_conversions.h"
+-#include "shell/browser/ui/electron_menu_model.h"
+-#include "shell/browser/ui/views/global_menu_bar_registrar_x11.h"
+ #include "third_party/abseil-cpp/absl/strings/str_format.h"
+-#include "ui/aura/window.h"
+-#include "ui/aura/window_tree_host.h"
+ #include "ui/base/accelerators/menu_label_accelerator_util_linux.h"
++#include "ui/base/ozone_buildflags.h"
+ #include "ui/events/keycodes/keyboard_code_conversion_x.h"
+ #include "ui/events/keycodes/keysym_to_unicode.h"
+-#include "ui/gfx/x/connection.h"
+-#include "ui/gfx/x/event.h"
+ #include "ui/gfx/x/keysyms/keysyms.h"
++#include "ui/platform_window/extensions/wayland_extension.h"
++#include "ui/platform_window/platform_window.h"
++
++#if BUILDFLAG(SUPPORTS_OZONE_X11)
++#include "shell/browser/ui/views/global_menu_bar_registrar_x11.h"
+ #include "ui/gfx/x/xproto.h"
++#include "ui/platform_window/extensions/x11_extension.h"
++#endif
+ 
+-// libdbusmenu-glib types
++// libdbusmenu-glib types.
+ using DbusmenuMenuitem = struct _DbusmenuMenuitem;
+ using dbusmenu_menuitem_new_func = DbusmenuMenuitem* (*)();
+ using dbusmenu_menuitem_new_with_id_func = DbusmenuMenuitem* (*)(int id);
+ 
+ using dbusmenu_menuitem_get_id_func = int (*)(DbusmenuMenuitem* item);
+-using dbusmenu_menuitem_get_children_func = GList* (*)(DbusmenuMenuitem * item);
++using dbusmenu_menuitem_get_children_func = GList* (*)(DbusmenuMenuitem* item);
+ using dbusmenu_menuitem_child_append_func =
+-    DbusmenuMenuitem* (*)(DbusmenuMenuitem * parent, DbusmenuMenuitem* child);
++    DbusmenuMenuitem* (*)(DbusmenuMenuitem* parent, DbusmenuMenuitem* child);
+ using dbusmenu_menuitem_property_set_func =
+-    DbusmenuMenuitem* (*)(DbusmenuMenuitem * item,
++    DbusmenuMenuitem* (*)(DbusmenuMenuitem* item,
+                           const char* property,
+                           const char* value);
+ using dbusmenu_menuitem_property_set_variant_func =
+-    DbusmenuMenuitem* (*)(DbusmenuMenuitem * item,
++    DbusmenuMenuitem* (*)(DbusmenuMenuitem* item,
+                           const char* property,
+                           GVariant* value);
+ using dbusmenu_menuitem_property_set_bool_func =
+-    DbusmenuMenuitem* (*)(DbusmenuMenuitem * item,
++    DbusmenuMenuitem* (*)(DbusmenuMenuitem* item,
+                           const char* property,
+                           bool value);
+ using dbusmenu_menuitem_property_set_int_func =
+-    DbusmenuMenuitem* (*)(DbusmenuMenuitem * item,
++    DbusmenuMenuitem* (*)(DbusmenuMenuitem* item,
+                           const char* property,
+                           int value);
+ 
+@@ -58,9 +62,6 @@ namespace electron {
+ 
+ namespace {
+ 
+-// Retrieved functions from libdbusmenu-glib.
+-
+-// DbusmenuMenuItem methods:
+ dbusmenu_menuitem_new_func menuitem_new = nullptr;
+ dbusmenu_menuitem_new_with_id_func menuitem_new_with_id = nullptr;
+ dbusmenu_menuitem_get_id_func menuitem_get_id = nullptr;
+@@ -73,11 +74,9 @@ dbusmenu_menuitem_property_set_variant_func menuitem_property_set_variant =
+ dbusmenu_menuitem_property_set_bool_func menuitem_property_set_bool = nullptr;
+ dbusmenu_menuitem_property_set_int_func menuitem_property_set_int = nullptr;
+ 
+-// DbusmenuServer methods:
+ dbusmenu_server_new_func server_new = nullptr;
+ dbusmenu_server_set_root_func server_set_root = nullptr;
+ 
+-// Properties that we set on menu items:
+ const char kPropertyEnabled[] = "enabled";
+ const char kPropertyLabel[] = "label";
+ const char kPropertyShortcut[] = "shortcut";
+@@ -104,7 +103,6 @@ void EnsureMethodsLoaded() {
+   if (!dbusmenu_lib)
+     return;
+ 
+-  // DbusmenuMenuItem methods.
+   menuitem_new = reinterpret_cast<dbusmenu_menuitem_new_func>(
+       dlsym(dbusmenu_lib, "dbusmenu_menuitem_new"));
+   menuitem_new_with_id = reinterpret_cast<dbusmenu_menuitem_new_with_id_func>(
+@@ -130,13 +128,33 @@ void EnsureMethodsLoaded() {
+       reinterpret_cast<dbusmenu_menuitem_property_set_int_func>(
+           dlsym(dbusmenu_lib, "dbusmenu_menuitem_property_set_int"));
+ 
+-  // DbusmenuServer methods.
+   server_new = reinterpret_cast<dbusmenu_server_new_func>(
+       dlsym(dbusmenu_lib, "dbusmenu_server_new"));
+   server_set_root = reinterpret_cast<dbusmenu_server_set_root_func>(
+       dlsym(dbusmenu_lib, "dbusmenu_server_set_root"));
+ }
+ 
++uint32_t NextMenuId() {
++  static base::AtomicSequenceNumber next_menu_id;
++  return static_cast<uint32_t>(next_menu_id.GetNext() + 1);
++}
++
++std::string GetSessionBusServiceName() {
++  GError* error = nullptr;
++  GDBusConnection* connection = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr,
++                                               &error);
++  if (!connection) {
++    if (error)
++      g_error_free(error);
++    return {};
++  }
++
++  const char* unique_name = g_dbus_connection_get_unique_name(connection);
++  std::string service_name = unique_name ? unique_name : std::string();
++  g_object_unref(connection);
++  return service_name;
++}
++
+ ElectronMenuModel* ModelForMenuItem(DbusmenuMenuitem* item) {
+   return reinterpret_cast<ElectronMenuModel*>(
+       g_object_get_data(G_OBJECT(item), "model"));
+@@ -154,8 +172,6 @@ bool GetMenuItemID(DbusmenuMenuitem* item, size_t* id) {
+ 
+ void SetMenuItemID(DbusmenuMenuitem* item, int id) {
+   DCHECK_GE(id, 0);
+-
+-  // Add 1 to the menu_id to avoid setting zero (null) to "menu-id".
+   g_object_set_data(G_OBJECT(item), "menu-id", GINT_TO_POINTER(id + 1));
+ }
+ 
+@@ -173,64 +189,147 @@ std::string GetMenuModelStatus(ElectronMenuModel* model) {
+ 
+ }  // namespace
+ 
+-GlobalMenuBarX11::GlobalMenuBarX11(gfx::AcceleratedWidget accelerated_widget)
+-    : xwindow_(static_cast<x11::Window>(accelerated_widget)) {
+-  EnsureMethodsLoaded();
+-  if (server_new)
+-    InitServer(xwindow_);
++GlobalMenuBarLinux::Backend GlobalMenuBarLinux::GetBackend(
++    ui::PlatformWindow* platform_window) {
++  if (!platform_window)
++    return Backend::kNone;
++
++  if (ui::GetWaylandToplevelExtension(*platform_window))
++    return Backend::kWayland;
+ 
+-  GlobalMenuBarRegistrarX11::GetInstance()->OnWindowMapped(xwindow_);
++#if BUILDFLAG(SUPPORTS_OZONE_X11)
++  if (ui::GetX11Extension(*platform_window))
++    return Backend::kX11;
++#endif
++
++  return Backend::kNone;
+ }
+ 
+-GlobalMenuBarX11::~GlobalMenuBarX11() {
++GlobalMenuBarLinux::GlobalMenuBarLinux(ui::PlatformWindow* platform_window,
++                                       gfx::AcceleratedWidget accelerated_widget)
++    : backend_(GetBackend(platform_window)),
++      accelerated_widget_(accelerated_widget),
++      object_path_(backend_ == Backend::kX11
++                       ? GetPathForId(static_cast<uint32_t>(accelerated_widget))
++                       : backend_ == Backend::kWayland
++                             ? GetPathForId(NextMenuId())
++                             : std::string()),
++      service_name_(backend_ == Backend::kWayland ? GetSessionBusServiceName()
++                                                  : std::string()) {
++  EnsureMethodsLoaded();
++  if (server_new && !object_path_.empty())
++    InitServer(object_path_);
++}
++
++GlobalMenuBarLinux::~GlobalMenuBarLinux() {
+   if (IsServerStarted())
+     g_object_unref(server_);
+-
+-  GlobalMenuBarRegistrarX11::GetInstance()->OnWindowUnmapped(xwindow_);
+ }
+ 
+ // static
+-std::string GlobalMenuBarX11::GetPathForWindow(x11::Window window) {
+-  return absl::StrFormat("/com/canonical/menu/%X", static_cast<uint>(window));
++std::string GlobalMenuBarLinux::GetPathForId(uint32_t id) {
++  return absl::StrFormat("/com/canonical/menu/%X", id);
+ }
+ 
+-void GlobalMenuBarX11::SetMenu(ElectronMenuModel* menu_model) {
++void GlobalMenuBarLinux::SetMenu(ElectronMenuModel* menu_model) {
+   if (!IsServerStarted())
+     return;
+ 
+   DbusmenuMenuitem* root_item = menuitem_new();
+   menuitem_property_set(root_item, kPropertyLabel, "Root");
+   menuitem_property_set_bool(root_item, kPropertyVisible, true);
+-  if (menu_model != nullptr) {
++  if (menu_model != nullptr)
+     BuildMenuFromModel(menu_model, root_item);
+-  }
+ 
+   server_set_root(server_, root_item);
+   g_object_unref(root_item);
+ }
+ 
+-bool GlobalMenuBarX11::IsServerStarted() const {
+-  return server_;
++bool GlobalMenuBarLinux::IsServerStarted() const {
++  if (!server_ || backend_ == Backend::kNone)
++    return false;
++
++  if (backend_ == Backend::kWayland)
++    return !service_name_.empty();
++
++  return true;
+ }
+ 
+-void GlobalMenuBarX11::InitServer(x11::Window window) {
+-  std::string path = GetPathForWindow(window);
+-  server_ = server_new(path.c_str());
++void GlobalMenuBarLinux::OnWindowMapped(ui::PlatformWindow* platform_window) {
++  AttachToWindow(platform_window);
+ }
+ 
+-void GlobalMenuBarX11::OnWindowMapped() {
+-  GlobalMenuBarRegistrarX11::GetInstance()->OnWindowMapped(xwindow_);
++void GlobalMenuBarLinux::OnWindowUnmapped(ui::PlatformWindow* platform_window) {
++  DetachFromWindow(platform_window);
++}
++
++void GlobalMenuBarLinux::InitServer(const std::string& object_path) {
++  server_ = server_new(object_path.c_str());
++}
++
++void GlobalMenuBarLinux::AttachToWindow(ui::PlatformWindow* platform_window) {
++  if (!IsServerStarted() || attached_)
++    return;
++
++  switch (backend_) {
++    case Backend::kWayland: {
++      if (!platform_window)
++        return;
++
++      auto* toplevel_extension =
++          ui::GetWaylandToplevelExtension(*platform_window);
++      if (!toplevel_extension)
++        return;
++
++      toplevel_extension->SetAppmenu(service_name_, object_path_);
++      attached_ = true;
++      return;
++    }
++    case Backend::kX11:
++#if BUILDFLAG(SUPPORTS_OZONE_X11)
++      GlobalMenuBarRegistrarX11::GetInstance()->OnWindowMapped(
++          static_cast<x11::Window>(accelerated_widget_), object_path_);
++      attached_ = true;
++#endif
++      return;
++    case Backend::kNone:
++      return;
++  }
+ }
+ 
+-void GlobalMenuBarX11::OnWindowUnmapped() {
+-  GlobalMenuBarRegistrarX11::GetInstance()->OnWindowUnmapped(xwindow_);
++void GlobalMenuBarLinux::DetachFromWindow(ui::PlatformWindow* platform_window) {
++  if (!attached_)
++    return;
++
++  switch (backend_) {
++    case Backend::kWayland: {
++      if (!platform_window)
++        return;
++
++      auto* toplevel_extension =
++          ui::GetWaylandToplevelExtension(*platform_window);
++      if (!toplevel_extension)
++        return;
++
++      toplevel_extension->UnsetAppmenu();
++      attached_ = false;
++      return;
++    }
++    case Backend::kX11:
++#if BUILDFLAG(SUPPORTS_OZONE_X11)
++      GlobalMenuBarRegistrarX11::GetInstance()->OnWindowUnmapped(
++          static_cast<x11::Window>(accelerated_widget_));
++      attached_ = false;
++#endif
++      return;
++    case Backend::kNone:
++      return;
++  }
+ }
+ 
+-void GlobalMenuBarX11::BuildMenuFromModel(ElectronMenuModel* model,
+-                                          DbusmenuMenuitem* parent) {
++void GlobalMenuBarLinux::BuildMenuFromModel(ElectronMenuModel* model,
++                                            DbusmenuMenuitem* parent) {
+   auto connect = [&](auto* sender, const char* detailed_signal, auto receiver) {
+-    // Unretained() is safe since GlobalMenuBarX11 will own the
+-    // ScopedGSignal.
+     signals_.emplace_back(
+         sender, detailed_signal,
+         base::BindRepeating(receiver, base::Unretained(this)));
+@@ -253,13 +352,13 @@ void GlobalMenuBarX11::BuildMenuFromModel(ElectronMenuModel* model,
+ 
+       if (type == ElectronMenuModel::TYPE_SUBMENU) {
+         menuitem_property_set(item, kPropertyChildrenDisplay, kDisplaySubmenu);
+-        connect(item, "about-to-show", &GlobalMenuBarX11::OnSubMenuShow);
++        connect(item, "about-to-show", &GlobalMenuBarLinux::OnSubMenuShow);
+       } else {
+         ui::Accelerator accelerator;
+         if (model->GetAcceleratorAtWithParams(i, true, &accelerator))
+           RegisterAccelerator(item, accelerator);
+ 
+-        connect(item, "item-activated", &GlobalMenuBarX11::OnItemActivated);
++        connect(item, "item-activated", &GlobalMenuBarLinux::OnItemActivated);
+ 
+         if (type == ElectronMenuModel::TYPE_CHECK ||
+             type == ElectronMenuModel::TYPE_RADIO) {
+@@ -278,10 +377,9 @@ void GlobalMenuBarX11::BuildMenuFromModel(ElectronMenuModel* model,
+   }
+ }
+ 
+-void GlobalMenuBarX11::RegisterAccelerator(DbusmenuMenuitem* item,
+-                                           const ui::Accelerator& accelerator) {
+-  // A translation of libdbusmenu-gtk's menuitem_property_set_shortcut()
+-  // translated from GDK types to ui::Accelerator types.
++void GlobalMenuBarLinux::RegisterAccelerator(
++    DbusmenuMenuitem* item,
++    const ui::Accelerator& accelerator) {
+   GVariantBuilder builder;
+   g_variant_builder_init(&builder, G_VARIANT_TYPE_ARRAY);
+ 
+@@ -309,36 +407,32 @@ void GlobalMenuBarX11::RegisterAccelerator(DbusmenuMenuitem* item,
+   menuitem_property_set_variant(item, kPropertyShortcut, outside_array);
+ }
+ 
+-void GlobalMenuBarX11::OnItemActivated(DbusmenuMenuitem* item,
+-                                       unsigned int timestamp) {
++void GlobalMenuBarLinux::OnItemActivated(DbusmenuMenuitem* item,
++                                         unsigned int timestamp) {
+   size_t id;
+   ElectronMenuModel* model = ModelForMenuItem(item);
+   if (model && GetMenuItemID(item, &id))
+     model->ActivatedAt(id, 0);
+ }
+ 
+-void GlobalMenuBarX11::OnSubMenuShow(DbusmenuMenuitem* item) {
++void GlobalMenuBarLinux::OnSubMenuShow(DbusmenuMenuitem* item) {
+   size_t id;
+   ElectronMenuModel* model = ModelForMenuItem(item);
+   if (!model || !GetMenuItemID(item, &id))
+     return;
+ 
+-  // Do not update menu if the submenu has not been changed.
+   std::string status = GetMenuModelStatus(model);
+   char* old = static_cast<char*>(g_object_get_data(G_OBJECT(item), "status"));
+   if (old && status == old)
+     return;
+ 
+-  // Save the new status.
+   g_object_set_data_full(G_OBJECT(item), "status", g_strdup(status.c_str()),
+                          g_free);
+ 
+-  // Clear children.
+   GList* children = menuitem_take_children(item);
+   g_list_foreach(children, reinterpret_cast<GFunc>(g_object_unref), nullptr);
+   g_list_free(children);
+ 
+-  // Build children.
+   BuildMenuFromModel(model->GetSubmenuModelAt(id), item);
+ }
+ 
+diff --git a/shell/browser/ui/views/global_menu_bar_linux.h b/shell/browser/ui/views/global_menu_bar_linux.h
+new file mode 100644
+index 000000000..2d5d6242c
+--- /dev/null
++++ b/shell/browser/ui/views/global_menu_bar_linux.h
+@@ -0,0 +1,78 @@
++// Copyright (c) 2014 GitHub, Inc.
++// Use of this source code is governed by the MIT license that can be
++// found in the LICENSE file.
++
++#ifndef ELECTRON_SHELL_BROWSER_UI_VIEWS_GLOBAL_MENU_BAR_LINUX_H_
++#define ELECTRON_SHELL_BROWSER_UI_VIEWS_GLOBAL_MENU_BAR_LINUX_H_
++
++#include <cstdint>
++#include <string>
++#include <vector>
++
++#include "base/memory/raw_ptr.h"
++#include "shell/browser/ui/electron_menu_model.h"
++#include "ui/base/glib/scoped_gsignal.h"
++#include "ui/gfx/native_ui_types.h"
++
++typedef struct _DbusmenuMenuitem DbusmenuMenuitem;
++typedef struct _DbusmenuServer DbusmenuServer;
++
++namespace ui {
++class Accelerator;
++class PlatformWindow;
++}  // namespace ui
++
++namespace electron {
++
++// Exports Electron menu models over com.canonical.dbusmenu and attaches the
++// exported menu to the current Linux window using the matching window-system
++// backend.
++class GlobalMenuBarLinux {
++ public:
++  GlobalMenuBarLinux(ui::PlatformWindow* platform_window,
++                     gfx::AcceleratedWidget accelerated_widget);
++  ~GlobalMenuBarLinux();
++
++  GlobalMenuBarLinux(const GlobalMenuBarLinux&) = delete;
++  GlobalMenuBarLinux& operator=(const GlobalMenuBarLinux&) = delete;
++
++  void SetMenu(ElectronMenuModel* menu_model);
++  bool IsServerStarted() const;
++
++  // Called by NativeWindow when the underlying platform window is shown/hidden
++  // or otherwise needs to attach/detach from the exported D-Bus menu.
++  void OnWindowMapped(ui::PlatformWindow* platform_window);
++  void OnWindowUnmapped(ui::PlatformWindow* platform_window);
++
++ private:
++  enum class Backend {
++    kNone,
++    kWayland,
++    kX11,
++  };
++
++  static Backend GetBackend(ui::PlatformWindow* platform_window);
++  static std::string GetPathForId(uint32_t id);
++
++  void InitServer(const std::string& object_path);
++  void AttachToWindow(ui::PlatformWindow* platform_window);
++  void DetachFromWindow(ui::PlatformWindow* platform_window);
++  void BuildMenuFromModel(ElectronMenuModel* model, DbusmenuMenuitem* parent);
++  void RegisterAccelerator(DbusmenuMenuitem* item,
++                           const ui::Accelerator& accelerator);
++  void OnItemActivated(DbusmenuMenuitem* item, unsigned int timestamp);
++  void OnSubMenuShow(DbusmenuMenuitem* item);
++
++  const Backend backend_ = Backend::kNone;
++  const gfx::AcceleratedWidget accelerated_widget_;
++  const std::string object_path_;
++  const std::string service_name_;
++
++  raw_ptr<DbusmenuServer> server_ = nullptr;
++  bool attached_ = false;
++  std::vector<ScopedGSignal> signals_;
++};
++
++}  // namespace electron
++
++#endif  // ELECTRON_SHELL_BROWSER_UI_VIEWS_GLOBAL_MENU_BAR_LINUX_H_
+diff --git a/shell/browser/ui/views/global_menu_bar_registrar_x11.cc b/shell/browser/ui/views/global_menu_bar_registrar_x11.cc
+index 5789ae7f4..8d368a8c9 100644
+--- a/shell/browser/ui/views/global_menu_bar_registrar_x11.cc
++++ b/shell/browser/ui/views/global_menu_bar_registrar_x11.cc
+@@ -10,7 +10,6 @@
+ #include "base/functional/bind.h"
+ #include "base/memory/singleton.h"
+ #include "content/public/browser/browser_thread.h"
+-#include "shell/browser/ui/views/global_menu_bar_x11.h"
+ 
+ using content::BrowserThread;
+ 
+@@ -26,11 +25,13 @@ GlobalMenuBarRegistrarX11* GlobalMenuBarRegistrarX11::GetInstance() {
+   return base::Singleton<GlobalMenuBarRegistrarX11>::get();
+ }
+ 
+-void GlobalMenuBarRegistrarX11::OnWindowMapped(x11::Window window) {
+-  live_windows_.insert(window);
++void GlobalMenuBarRegistrarX11::OnWindowMapped(
++    x11::Window window,
++    const std::string& object_path) {
++  live_windows_[window] = object_path;
+ 
+   if (registrar_proxy_)
+-    RegisterXWindow(window);
++    RegisterXWindow(window, object_path);
+ }
+ 
+ void GlobalMenuBarRegistrarX11::OnWindowUnmapped(x11::Window window) {
+@@ -61,9 +62,10 @@ GlobalMenuBarRegistrarX11::~GlobalMenuBarRegistrarX11() {
+   }
+ }
+ 
+-void GlobalMenuBarRegistrarX11::RegisterXWindow(x11::Window window) {
++void GlobalMenuBarRegistrarX11::RegisterXWindow(
++    x11::Window window,
++    const std::string& object_path) {
+   DCHECK(registrar_proxy_);
+-  std::string path = electron::GlobalMenuBarX11::GetPathForWindow(window);
+ 
+   ANNOTATE_SCOPED_MEMORY_LEAK;  // http://crbug.com/314087
+   // TODO(erg): The mozilla implementation goes to a lot of callback trouble
+@@ -74,7 +76,7 @@ void GlobalMenuBarRegistrarX11::RegisterXWindow(x11::Window window) {
+   // I don't see any reason why we should care if "RegisterWindow" completes or
+   // not.
+   g_dbus_proxy_call(registrar_proxy_, "RegisterWindow",
+-                    g_variant_new("(uo)", window, path.c_str()),
++                    g_variant_new("(uo)", window, object_path.c_str()),
+                     G_DBUS_CALL_FLAGS_NONE, -1, nullptr, nullptr, nullptr);
+ }
+ 
+@@ -129,7 +131,7 @@ void GlobalMenuBarRegistrarX11::OnNameOwnerChanged(GDBusProxy* /* ignored */,
+                                                    GParamSpec* /* ignored */) {
+   // If the name owner changed, we need to reregister all the live x11::Window
+   // with the system.
+-  for (const auto& window : live_windows_) {
+-    RegisterXWindow(window);
++  for (const auto& [window, object_path] : live_windows_) {
++    RegisterXWindow(window, object_path);
+   }
+ }
+diff --git a/shell/browser/ui/views/global_menu_bar_registrar_x11.h b/shell/browser/ui/views/global_menu_bar_registrar_x11.h
+index 655b3b005..b1f3e273c 100644
+--- a/shell/browser/ui/views/global_menu_bar_registrar_x11.h
++++ b/shell/browser/ui/views/global_menu_bar_registrar_x11.h
+@@ -7,15 +7,17 @@
+ 
+ #include <gio/gio.h>
+ 
++#include <string>
++
+ #include "base/memory/raw_ptr.h"
+ #include "base/memory/singleton.h"
+-#include "third_party/abseil-cpp/absl/container/flat_hash_set.h"
++#include "third_party/abseil-cpp/absl/container/flat_hash_map.h"
+ #include "ui/base/glib/scoped_gsignal.h"
+ #include "ui/gfx/x/xproto.h"
+ 
+ // Advertises our menu bars to Unity.
+ //
+-// GlobalMenuBarX11 is responsible for managing the DbusmenuServer for each
++// GlobalMenuBarLinux is responsible for managing the DbusmenuServer for each
+ // x11::Window. We need a separate object to own the dbus channel to
+ // com.canonical.AppMenu.Registrar and to register/unregister the mapping
+ // between a x11::Window and the DbusmenuServer instance we are offering.
+@@ -23,7 +25,7 @@ class GlobalMenuBarRegistrarX11 {
+  public:
+   static GlobalMenuBarRegistrarX11* GetInstance();
+ 
+-  void OnWindowMapped(x11::Window window);
++  void OnWindowMapped(x11::Window window, const std::string& object_path);
+   void OnWindowUnmapped(x11::Window window);
+ 
+  private:
+@@ -38,7 +40,7 @@ class GlobalMenuBarRegistrarX11 {
+       delete;
+ 
+   // Sends the actual message.
+-  void RegisterXWindow(x11::Window window);
++  void RegisterXWindow(x11::Window window, const std::string& object_path);
+   void UnregisterXWindow(x11::Window window);
+ 
+   static void OnProxyCreated(GObject* source,
+@@ -51,7 +53,7 @@ class GlobalMenuBarRegistrarX11 {
+ 
+   // x11::Window which want to be registered, but haven't yet been because
+   // we're waiting for the proxy to become available.
+-  absl::flat_hash_set<x11::Window> live_windows_;
++  absl::flat_hash_map<x11::Window, std::string> live_windows_;
+   ScopedGSignal signal_;
+ };
+ 
+diff --git a/shell/browser/ui/views/global_menu_bar_x11.h b/shell/browser/ui/views/global_menu_bar_x11.h
+deleted file mode 100644
+index e086273dd..000000000
+--- a/shell/browser/ui/views/global_menu_bar_x11.h
++++ /dev/null
+@@ -1,77 +0,0 @@
+-// Copyright (c) 2014 GitHub, Inc.
+-// Use of this source code is governed by the MIT license that can be
+-// found in the LICENSE file.
+-
+-#ifndef ELECTRON_SHELL_BROWSER_UI_VIEWS_GLOBAL_MENU_BAR_X11_H_
+-#define ELECTRON_SHELL_BROWSER_UI_VIEWS_GLOBAL_MENU_BAR_X11_H_
+-
+-#include <string>
+-
+-#include "base/memory/raw_ptr.h"
+-#include "shell/browser/ui/electron_menu_model.h"
+-#include "ui/base/glib/scoped_gsignal.h"
+-#include "ui/gfx/native_ui_types.h"
+-#include "ui/gfx/x/xproto.h"
+-
+-typedef struct _DbusmenuMenuitem DbusmenuMenuitem;
+-typedef struct _DbusmenuServer DbusmenuServer;
+-
+-namespace ui {
+-class Accelerator;
+-}
+-
+-namespace electron {
+-
+-// Controls the Mac style menu bar on Unity.
+-//
+-// Unity has an Apple-like menu bar at the top of the screen that changes
+-// depending on the active window. In the GTK port, we had a hidden GtkMenuBar
+-// object in each GtkWindow which existed only to be scrapped by the
+-// libdbusmenu-gtk code. Since we don't have GtkWindows anymore, we need to
+-// interface directly with the lower level libdbusmenu-glib, which we
+-// opportunistically dlopen() since not everyone is running Ubuntu.
+-//
+-// This class is like the chrome's corresponding one, but it generates the menu
+-// from menu models instead, and it is also per-window specific.
+-class GlobalMenuBarX11 {
+- public:
+-  explicit GlobalMenuBarX11(gfx::AcceleratedWidget accelerated_widget);
+-  virtual ~GlobalMenuBarX11();
+-
+-  // disable copy
+-  GlobalMenuBarX11(const GlobalMenuBarX11&) = delete;
+-  GlobalMenuBarX11& operator=(const GlobalMenuBarX11&) = delete;
+-
+-  // Creates the object path for DbusmenuServer which is attached to |window|.
+-  static std::string GetPathForWindow(x11::Window window);
+-
+-  void SetMenu(ElectronMenuModel* menu_model);
+-  bool IsServerStarted() const;
+-
+-  // Called by NativeWindow when it show/hides.
+-  void OnWindowMapped();
+-  void OnWindowUnmapped();
+-
+- private:
+-  // Creates a DbusmenuServer.
+-  void InitServer(x11::Window window);
+-
+-  // Create a menu from menu model.
+-  void BuildMenuFromModel(ElectronMenuModel* model, DbusmenuMenuitem* parent);
+-
+-  // Sets the accelerator for |item|.
+-  void RegisterAccelerator(DbusmenuMenuitem* item,
+-                           const ui::Accelerator& accelerator);
+-
+-  void OnItemActivated(DbusmenuMenuitem* item, unsigned int timestamp);
+-  void OnSubMenuShow(DbusmenuMenuitem* item);
+-
+-  x11::Window xwindow_;
+-
+-  raw_ptr<DbusmenuServer> server_ = nullptr;
+-  std::vector<ScopedGSignal> signals_;
+-};
+-
+-}  // namespace electron
+-
+-#endif  // ELECTRON_SHELL_BROWSER_UI_VIEWS_GLOBAL_MENU_BAR_X11_H_
+diff --git a/shell/browser/ui/x/x_window_utils.cc b/shell/browser/ui/x/x_window_utils.cc
+index bc69f5fed..9c9a86296 100644
+--- a/shell/browser/ui/x/x_window_utils.cc
++++ b/shell/browser/ui/x/x_window_utils.cc
+@@ -6,7 +6,6 @@
+ 
+ #include <memory>
+ 
+-#include "base/environment.h"
+ #include "base/strings/string_util.h"
+ #include "dbus/bus.h"
+ #include "dbus/message.h"
+@@ -28,12 +27,8 @@ void SetWindowType(x11::Window window, const std::string& type) {
+                           x11::Atom::ATOM, window_type);
+ }
+ 
+-bool ShouldUseGlobalMenuBar() {
++bool HasGlobalMenuBarX11Registrar() {
+   ScopedAllowBlockingForElectron allow_blocking;
+-  auto env = base::Environment::Create();
+-  if (env->HasVar("ELECTRON_FORCE_WINDOW_MENU_BAR"))
+-    return false;
+-
+   auto bus = base::MakeRefCounted<dbus::Bus>(dbus::Bus::Options{});
+ 
+   dbus::ObjectProxy* object_proxy =
+diff --git a/shell/browser/ui/x/x_window_utils.h b/shell/browser/ui/x/x_window_utils.h
+index 767eb2112..700b7ed7a 100644
+--- a/shell/browser/ui/x/x_window_utils.h
++++ b/shell/browser/ui/x/x_window_utils.h
+@@ -15,7 +15,7 @@ namespace electron {
+ void SetWindowType(x11::Window window, const std::string& type);
+ 
+ // Returns true if the bus name "com.canonical.AppMenu.Registrar" is available.
+-bool ShouldUseGlobalMenuBar();
++bool HasGlobalMenuBarX11Registrar();
+ 
+ // Bring the given window to the front regardless of focus.
+ void MoveWindowToForeground(x11::Window window);

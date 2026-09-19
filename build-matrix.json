@@ -1,0 +1,75 @@
+{
+  "36": {
+    "version": "36.9.5",
+    "build": true,
+    "patches": [],
+    "chromiumPatches": [
+      "patches/36/compact-linux-menus.patch"
+    ]
+  },
+  "37": {
+    "version": "37.10.3",
+    "build": true,
+    "patches": [],
+    "chromiumPatches": [
+      "patches/37/compact-linux-menus.patch"
+    ]
+  },
+  "38": {
+    "version": "38.8.6",
+    "build": true,
+    "patches": [],
+    "chromiumPatches": [
+      "patches/38/compact-linux-menus.patch"
+    ]
+  },
+  "39": {
+    "version": "39.8.10",
+    "build": true,
+    "patches": [],
+    "chromiumPatches": [
+      "patches/39/compact-linux-menus.patch"
+    ]
+  },
+  "40": {
+    "version": "40.10.6",
+    "build": true,
+    "patches": [],
+    "chromiumPatches": [
+      "patches/40/compact-linux-menus.patch"
+    ]
+  },
+  "41": {
+    "version": "41.10.4",
+    "build": true,
+    "patches": [
+      "patches/41/51010-respect-linux-wco-button-order.patch",
+      "patches/41/wayland-appmenu.patch"
+    ],
+    "chromiumPatches": [
+      "patches/41/compact-linux-menus.patch"
+    ]
+  },
+  "42": {
+    "version": "42.8.1",
+    "build": true,
+    "patches": [
+      "patches/42/51010-respect-linux-wco-button-order.patch",
+      "patches/42/wayland-appmenu.patch"
+    ],
+    "chromiumPatches": [
+      "patches/42/compact-linux-menus.patch"
+    ]
+  },
+  "43": {
+    "version": "43.3.0",
+    "build": true,
+    "patches": [
+      "patches/43/wayland-appmenu.patch",
+      "patches/43/52461-system-themed-wco-icons.patch"
+    ],
+    "chromiumPatches": [
+      "patches/43/compact-linux-menus.patch"
+    ]
+  }
+}

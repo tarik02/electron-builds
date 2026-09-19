@@ -1,0 +1,23 @@
+{
+  "remoteBuild": "siso",
+  "root": "__ELECTRON_WORKSPACE__",
+  "remotes": {
+    "electron": {
+      "origin": "https://github.com/electron/electron.git"
+    }
+  },
+  "gen": {
+    "args": [
+      "import(\"//electron/build/args/release.gn\")",
+      "use_remoteexec = true",
+      "use_reclient = false",
+      "use_siso = true",
+      "target_cpu=\"x64\""
+    ],
+    "out": "Release"
+  },
+  "env": {
+    "GIT_CACHE_PATH": "__GIT_CACHE_PATH__",
+    "CHROMIUM_BUILDTOOLS_PATH": "__CHROMIUM_BUILDTOOLS_PATH__"
+  }
+}

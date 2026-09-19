@@ -1,0 +1,83 @@
+diff --git a/ui/views/controls/menu/menu_config.h b/ui/views/controls/menu/menu_config.h
+--- a/ui/views/controls/menu/menu_config.h
++++ b/ui/views/controls/menu/menu_config.h
+@@ -175,6 +175,11 @@ struct VIEWS_EXPORT MenuConfig {
+   // Radius of selection background on menu items.
+   int item_corner_radius = 0;
+ 
++  // Insets applied to the painted selection background. The menu item's hit
++  // area remains unchanged.
++  int item_selection_vertical_inset = 0;
++  int item_selection_horizontal_inset = 0;
++
+   // Anchor offset for touchable menus created by a touch event.
+   int touchable_anchor_offset = 8;
+ 
+diff --git a/ui/views/controls/menu/menu_config_linux.cc b/ui/views/controls/menu/menu_config_linux.cc
+--- a/ui/views/controls/menu/menu_config_linux.cc
++++ b/ui/views/controls/menu/menu_config_linux.cc
+@@ -10,6 +10,15 @@ namespace views {
+ 
+ void MenuConfig::InitPlatform() {
+   use_bubble_border = true;
++  rounded_menu_vertical_border_size = 4;
++  item_vertical_margin = 5;
++  item_horizontal_padding = 6;
++  item_horizontal_border_padding = 4;
++  separator_height = 11;
++  separator_spacing_height = 2;
++  item_corner_radius = 8;
++  item_selection_vertical_inset = 1;
++  item_selection_horizontal_inset = 4;
+ }
+ 
+ }  // namespace views
+diff --git a/ui/views/controls/menu/menu_item_view.cc b/ui/views/controls/menu/menu_item_view.cc
+--- a/ui/views/controls/menu/menu_item_view.cc
++++ b/ui/views/controls/menu/menu_item_view.cc
+@@ -1268,17 +1268,24 @@ void MenuItemView::PaintButton(gfx::Canvas* canvas,
+       } else {
+         item_bounds.set_width(item_bounds.width() -
+                               config.actionable_submenu_width - 1);
+       }
+     }
++    if (!menu_item_background_.has_value()) {
++      item_bounds.Inset(gfx::Insets::VH(
++          config.item_selection_vertical_inset,
++          config.item_selection_horizontal_inset));
++    }
+     AdjustBoundsForRTLUI(&item_bounds);
+-
++
+-    ui::NativeTheme::MenuItemExtraParams menu_item_extra_params;
+-    menu_item_extra_params.corner_radius =
+-        menu_item_background_.has_value() ? menu_item_background_->corner_radius
+-                                          : config.item_corner_radius;
+-    GetNativeTheme()->Paint(
+-        canvas->sk_canvas(), GetColorProvider(),
+-        ui::NativeTheme::kMenuItemBackground, ui::NativeTheme::kHovered,
+-        item_bounds, ui::NativeTheme::ExtraParams(menu_item_extra_params));
++    cc::PaintFlags flags;
++    flags.setAntiAlias(true);
++    flags.setStyle(cc::PaintFlags::kFill_Style);
++    flags.setColor(GetColorProvider()->GetColor(
++        ui::kColorMenuItemBackgroundSelected));
++    canvas->DrawRoundRect(
++        item_bounds,
++        menu_item_background_.has_value() ? menu_item_background_->corner_radius
++                                          : config.item_corner_radius,
++        flags);
+   }
+ }
+diff --git a/ui/color/ui_color_mixer.cc b/ui/color/ui_color_mixer.cc
+--- a/ui/color/ui_color_mixer.cc
++++ b/ui/color/ui_color_mixer.cc
+@@ -128,3 +128,7 @@
+   mixer[kColorLiveCaptionBubbleLink] = {kColorLiveCaptionBubbleCheckbox};
+-  mixer[kColorMenuBackground] = {kColorPrimaryBackground};
++  if (dark_mode) {
++    mixer[kColorMenuBackground] = {SkColorSetRGB(0x24, 0x24, 0x24)};
++  } else {
++    mixer[kColorMenuBackground] = {kColorPrimaryBackground};
++  }
+   mixer[kColorMenuBorder] = {kColorMidground};

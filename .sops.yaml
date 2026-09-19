@@ -1,0 +1,3 @@
+creation_rules:
+  - path_regex: secrets/aws\.env$
+    age: age186f5hqa8kqy09g9cal2m06ayyrc0vs8pp6etcclmzeyh6duaqulqnrhlgx
